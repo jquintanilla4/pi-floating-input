@@ -1,0 +1,22 @@
+{
+  "name": "pi-floating-input",
+  "version": "0.1.0",
+  "description": "Experimental Pi extension that keeps the input editor fixed while chat scrolls above it.",
+  "type": "module",
+  "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "keywords": [
+    "pi",
+    "pi-extension",
+    "tui",
+    "floating-input",
+    "fixed-editor"
+  ],
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": ">=0.72.1"
+  }
+}
