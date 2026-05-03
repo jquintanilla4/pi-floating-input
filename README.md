@@ -24,6 +24,9 @@ These also appear as separate slash-menu entries so they are easier to discover:
 /floating-input-toggle
 /floating-input-status
 /floating-input-reset
+/floating-input-mouse-on
+/floating-input-mouse-off
+/floating-input-mouse-toggle
 ```
 
 `on` persists this setting to `~/.pi/agent/settings.json`:
@@ -41,9 +44,12 @@ These also appear as separate slash-menu entries so they are easier to discover:
 ## Controls
 
 - Mouse wheel: scroll chat/feed region when `mouseScroll` is enabled.
+- Click once in the chat region: temporarily pauses mouse capture so your next drag can use native terminal/tmux selection/copy. Mouse capture resumes after 8 seconds or on keyboard activity.
 - PageUp / PageDown: scroll chat/feed region.
 - Ctrl+Shift+Up / Ctrl+Shift+Down: scroll chat/feed region in many terminals.
 - Ctrl+G / Ctrl+Shift+G-ish encodings: jump to bottom. Terminal support varies.
+- `/floating-input-mouse-off`: fallback command to disable mouse capture for native selection/copy.
+- `/floating-input-mouse-on`: re-enable mouse wheel capture.
 
 ## Image behavior
 

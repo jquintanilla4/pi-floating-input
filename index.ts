@@ -82,12 +82,19 @@ export default function floatingInput(pi: ExtensionAPI) {
     const usage = ctx.getContextUsage?.();
     const usageText = usage?.percent == null ? "ctx: ?" : `ctx: ${Math.round(usage.percent)}%`;
     const mode = enabled ? "floating" : "off";
-    const line = ` ${theme.fg("accent", "◉")} ${theme.fg("muted", basename(ctx.cwd ?? process.cwd()))}  ${theme.fg("dim", model)}  ${theme.fg("dim", thinking)}  ${theme.fg("dim", usageText)}  ${theme.fg("success", mode)} `;
+    const mouseMode = compositor?.getMouseMode?.() ?? (config.mouseScroll ? "on" : "off");
+    const mouseText = mouseMode === "select" ? "select:on" : `mouse:${mouseMode}`;
+    const line = ` ${theme.fg("accent", "◉")} ${theme.fg("muted", basename(ctx.cwd ?? process.cwd()))}  ${theme.fg("dim", model)}  ${theme.fg("dim", thinking)}  ${theme.fg("dim", usageText)}  ${theme.fg("dim", mouseText)}  ${theme.fg("success", mode)} `;
     return [fit(line, width)];
   }
 
   function infoLines(ctx: any, width: number, theme: Theme): string[] {
-    const help = config.mouseScroll ? " wheel/page scroll • ctrl+shift+g bottom • /floating-input off " : " page scroll • /floating-input off ";
+    const mouseMode = compositor?.getMouseMode?.() ?? (config.mouseScroll ? "on" : "off");
+    const help = mouseMode === "select"
+      ? " mouse paused — drag to select/copy • resumes in 8s or on key "
+      : config.mouseScroll
+        ? " wheel/page scroll • click chat then drag to copy • /floating-input off "
+        : " page scroll • native mouse select/copy • /floating-input-mouse-on ";
     return [fit(theme.fg("dim", help), width)];
   }
 
@@ -134,6 +141,7 @@ export default function floatingInput(pi: ExtensionAPI) {
       tui,
       terminal: tui.terminal,
       mouseScroll: config.mouseScroll,
+      onMouseModeChange: () => tui.requestRender?.(),
       getShowHardwareCursor: () => typeof tui.getShowHardwareCursor === "function" && tui.getShowHardwareCursor(),
       renderCluster: (width, terminalRows) => {
         const theme = currentCtx?.ui?.theme ?? ctx.ui.theme;
@@ -211,13 +219,22 @@ export default function floatingInput(pi: ExtensionAPI) {
   }
 
   function notifyStatus(ctx: any) {
-    ctx.ui.notify(`floating-input: ${enabled ? "on" : "off"}, mouseScroll=${config.mouseScroll}, imageMode=${config.imageMode}`, "info");
+    const mouseMode = compositor?.getMouseMode?.() ?? (config.mouseScroll ? "on" : "off");
+    ctx.ui.notify(`floating-input: ${enabled ? "on" : "off"}, mouse=${mouseMode}, imageMode=${config.imageMode}`, "info");
   }
 
   function resetTerminal(ctx: any) {
     teardown();
     try { process.stdout.write(emergencyTerminalReset()); } catch {}
     ctx.ui.notify("Floating input terminal reset sent", "info");
+  }
+
+  function setMouseScroll(ctx: any, next: boolean) {
+    config = { ...config, mouseScroll: next };
+    saveConfig(config);
+    compositor?.setMouseScroll(next);
+    currentTui?.requestRender?.();
+    ctx.ui.notify(`Floating input mouse scroll ${next ? "enabled" : "disabled"}`, "info");
   }
 
   pi.registerCommand("floating-input", {
@@ -256,6 +273,21 @@ export default function floatingInput(pi: ExtensionAPI) {
   pi.registerCommand("floating-input-reset", {
     description: "Emergency reset terminal state used by floating input",
     handler: async (_args, ctx) => resetTerminal(ctx),
+  });
+
+  pi.registerCommand("floating-input-mouse-on", {
+    description: "Enable floating input mouse wheel scrolling/capture",
+    handler: async (_args, ctx) => setMouseScroll(ctx, true),
+  });
+
+  pi.registerCommand("floating-input-mouse-off", {
+    description: "Disable floating input mouse capture so native selection/copy works",
+    handler: async (_args, ctx) => setMouseScroll(ctx, false),
+  });
+
+  pi.registerCommand("floating-input-mouse-toggle", {
+    description: "Toggle floating input mouse capture for wheel scrolling vs native selection",
+    handler: async (_args, ctx) => setMouseScroll(ctx, !config.mouseScroll),
   });
 
   pi.on("session_start", (_event, ctx) => {

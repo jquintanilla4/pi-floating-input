@@ -14,9 +14,11 @@ export interface SplitCompositorOptions {
   renderCluster: (width: number, terminalRows: number) => FixedClusterRender;
   getShowHardwareCursor?: () => boolean;
   mouseScroll?: boolean;
+  onMouseModeChange?: () => void;
 }
 
 interface Patch { target: { render(width: number): string[] }; originalRender: (width: number) => string[] }
+interface SgrMousePacket { code: number; col: number; row: number; final: "M" | "m" }
 
 export function beginSync() { return "\x1b[?2026h"; }
 export function endSync() { return "\x1b[?2026l"; }
@@ -38,7 +40,7 @@ function disableAltScroll() { return "\x1b[?1007l"; }
 function enableAltScroll() { return "\x1b[?1007h"; }
 function stripOsc(line: string) { return line.replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, ""); }
 function hasTerminalGraphic(line: string) {
-  // Kitty graphics are APC sequences: ESC _ G ... ESC \\.
+  // Kitty graphics are APC sequences: ESC _ G ... ESC \.
   // iTerm2 images are usually OSC 1337 file sequences.
   return /\x1b_G[\s\S]*?(?:\x07|\x1b\\)/.test(line) || /\x1b\]1337;File=/.test(line);
 }
@@ -62,14 +64,23 @@ function descriptorForRows(terminal: TerminalLike): PropertyDescriptor | undefin
 function sanitize(line: string, width: number) {
   return visibleWidth(line) > width ? truncateToWidth(line, width, "", true) : line;
 }
-function parseMouseWheel(data: string): number {
-  const match = /^\x1b\[<(\d+);\d+;\d+M$/.exec(data);
-  if (!match) return 0;
-  const code = Number(match[1]);
-  const base = code & ~(4 | 8 | 16 | 32);
+function parseSgrMousePacket(data: string): SgrMousePacket | null {
+  const match = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/.exec(data);
+  if (!match) return null;
+  return { code: Number(match[1]), col: Number(match[2]), row: Number(match[3]), final: match[4] as "M" | "m" };
+}
+function mouseBaseButton(code: number): number {
+  return code & ~(4 | 8 | 16 | 32);
+}
+function mouseWheelDelta(packet: SgrMousePacket): number {
+  if (packet.final !== "M") return 0;
+  const base = mouseBaseButton(packet.code);
   if (base === 64) return 3;
   if (base === 65) return -3;
   return 0;
+}
+function isPlainLeftClick(packet: SgrMousePacket): boolean {
+  return packet.final === "M" && mouseBaseButton(packet.code) === 0 && (packet.code & 32) === 0;
 }
 function keyScrollDelta(data: string): number {
   if (isKeyRelease(data)) return 0;
@@ -95,7 +106,12 @@ export class SplitCompositor {
   private terminal: TerminalLike;
   private renderCluster: SplitCompositorOptions["renderCluster"];
   private getShowHardwareCursor: () => boolean;
+  private onMouseModeChange: () => void;
   private mouseScroll: boolean;
+  private mouseReportingEnabled = false;
+  private selectionPaused = false;
+  private selectionPauseUntil = 0;
+  private selectionPauseTimer: ReturnType<typeof setTimeout> | null = null;
   private rowsDescriptor?: PropertyDescriptor;
   private originalWrite: (data: string) => void;
   private originalRender: ((width: number) => string[]) | null;
@@ -118,6 +134,7 @@ export class SplitCompositor {
     this.terminal = options.terminal;
     this.renderCluster = options.renderCluster;
     this.getShowHardwareCursor = options.getShowHardwareCursor ?? (() => false);
+    this.onMouseModeChange = options.onMouseModeChange ?? (() => {});
     this.mouseScroll = options.mouseScroll !== false;
     this.rowsDescriptor = descriptorForRows(options.terminal);
     this.originalWrite = options.terminal.write.bind(options.terminal);
@@ -127,7 +144,8 @@ export class SplitCompositor {
 
   install() {
     if (this.installed) return;
-    this.originalWrite(beginSync() + enterAlt() + disableAltScroll() + (this.mouseScroll ? enableMouse() : "") + endSync());
+    this.mouseReportingEnabled = this.mouseScroll;
+    this.originalWrite(beginSync() + enterAlt() + disableAltScroll() + (this.mouseReportingEnabled ? enableMouse() : "") + endSync());
     this.cleanup = () => { if (!this.disposed) this.restore(); };
     process.once("exit", this.cleanup);
     Object.defineProperty(this.terminal, "rows", { configurable: true, get: () => this.getScrollableRows() });
@@ -152,6 +170,24 @@ export class SplitCompositor {
 
   jumpBottom() { this.scrollOffset = 0; this.requestRender(); }
 
+  setMouseScroll(enabled: boolean) {
+    if (this.disposed || this.mouseScroll === enabled) return;
+    this.mouseScroll = enabled;
+    this.selectionPaused = false;
+    if (this.selectionPauseTimer) {
+      clearTimeout(this.selectionPauseTimer);
+      this.selectionPauseTimer = null;
+    }
+    this.setMouseReporting(enabled);
+    this.onMouseModeChange();
+    this.requestRender();
+  }
+
+  getMouseMode(): "on" | "off" | "select" {
+    if (this.selectionPaused) return "select";
+    return this.mouseScroll ? "on" : "off";
+  }
+
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
@@ -166,7 +202,15 @@ export class SplitCompositor {
     this.restore();
   }
 
-  private restore() { this.originalWrite(beginSync() + resetScrollRegion() + (this.mouseScroll ? disableMouse() : "") + enableAltScroll() + exitAlt() + endSync()); }
+  private restore() {
+    if (this.selectionPauseTimer) {
+      clearTimeout(this.selectionPauseTimer);
+      this.selectionPauseTimer = null;
+    }
+    this.originalWrite(beginSync() + resetScrollRegion() + (this.mouseReportingEnabled ? disableMouse() : "") + enableAltScroll() + exitAlt() + endSync());
+    this.mouseReportingEnabled = false;
+    this.selectionPaused = false;
+  }
   private rawRows() { return Math.max(2, readRows(this.terminal, this.rowsDescriptor)); }
   private width() { return Math.max(1, this.terminal.columns || 80); }
   private cluster(width = this.width(), rows = this.rawRows()) {
@@ -198,13 +242,32 @@ export class SplitCompositor {
   }
   private handleInput(data: string): { consume?: boolean } | undefined {
     if (this.disposed || this.hasOverlay()) return undefined;
-    const delta = (this.mouseScroll ? parseMouseWheel(data) : 0) || keyScrollDelta(data);
+
+    if (this.selectionPaused && this.isKeyboardActivity(data)) {
+      this.resumeMouseReporting();
+    }
+
+    const packet = this.mouseReportingEnabled ? parseSgrMousePacket(data) : null;
+    if (packet) {
+      const delta = mouseWheelDelta(packet);
+      if (delta) {
+        this.scrollBy(delta);
+        return { consume: true };
+      }
+      if (isPlainLeftClick(packet) && packet.row <= this.visibleRows) {
+        this.armNativeSelection();
+        return { consume: true };
+      }
+      return undefined;
+    }
+
+    const delta = keyScrollDelta(data);
     if (!delta) return undefined;
-    const next = Math.max(0, Math.min(this.scrollOffset + delta, this.maxScrollOffset));
-    if (next !== this.scrollOffset) { this.scrollOffset = next; this.requestRender(); }
+    this.scrollBy(delta);
     return { consume: true };
   }
   private write(data: string) {
+    this.resumeAfterExpiredSelectionPause();
     if (this.disposed || this.writing || this.hasOverlay()) { this.originalWrite(data); return; }
     this.writing = true;
     try {
@@ -221,11 +284,58 @@ export class SplitCompositor {
     } finally { this.writing = false; }
   }
   private repaint() {
+    this.resumeAfterExpiredSelectionPause();
     if (this.disposed || this.hasOverlay()) return;
     const rows = this.rawRows();
     const width = this.width();
     this.originalWrite(beginSync() + buildClusterPaint(this.cluster(width, rows), rows, width, this.getShowHardwareCursor()) + endSync());
   }
+
+  private scrollBy(delta: number) {
+    const next = Math.max(0, Math.min(this.scrollOffset + delta, this.maxScrollOffset));
+    if (next !== this.scrollOffset) { this.scrollOffset = next; this.requestRender(); }
+  }
+
+  private setMouseReporting(enabled: boolean) {
+    if (this.mouseReportingEnabled === enabled) return;
+    this.mouseReportingEnabled = enabled;
+    this.originalWrite(beginSync() + (enabled ? enableMouse() : disableMouse()) + endSync());
+  }
+
+  private armNativeSelection() {
+    if (!this.mouseScroll || this.selectionPaused) return;
+    this.selectionPaused = true;
+    this.selectionPauseUntil = Date.now() + 8000;
+    this.setMouseReporting(false);
+    if (this.selectionPauseTimer) clearTimeout(this.selectionPauseTimer);
+    this.selectionPauseTimer = setTimeout(() => this.resumeMouseReporting(), 8000);
+    if (typeof this.selectionPauseTimer === "object" && "unref" in this.selectionPauseTimer) this.selectionPauseTimer.unref();
+    this.onMouseModeChange();
+    this.requestRender();
+  }
+
+  private resumeMouseReporting() {
+    if (!this.selectionPaused) return;
+    this.selectionPaused = false;
+    if (this.selectionPauseTimer) {
+      clearTimeout(this.selectionPauseTimer);
+      this.selectionPauseTimer = null;
+    }
+    if (this.mouseScroll) this.setMouseReporting(true);
+    this.onMouseModeChange();
+    this.requestRender();
+  }
+
+  private resumeAfterExpiredSelectionPause() {
+    if (this.selectionPaused && Date.now() >= this.selectionPauseUntil) this.resumeMouseReporting();
+  }
+
+  private isKeyboardActivity(data: string): boolean {
+    if (parseSgrMousePacket(data)) return false;
+    if (matchesKey(data, "escape") || matchesKey(data, "enter") || matchesKey(data, "pageUp") || matchesKey(data, "pageDown")) return true;
+    return data.length > 0;
+  }
+
   private requestRender() { if (typeof this.tui.requestRender === "function") this.tui.requestRender(); }
   private hasOverlay(): boolean {
     if (typeof this.tui.hasOverlay === "function" && this.tui.hasOverlay()) return true;
